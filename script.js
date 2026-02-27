@@ -182,12 +182,19 @@ grist.ready({ requiredAccess: 'full' });
 grist.onRecords(async (records) => {
     try {
         console.log("Recebendo atualização do Grist...");
-        // fetchTable retorna array de objetos {id: n, fields: {...}}
-        allRecords = await grist.docApi.fetchTable('Lancamentos');
-        bancoData = await grist.docApi.fetchTable('Banco');
-        cartoesData = await grist.docApi.fetchTable('Cartoes');
         
-        console.log("Dados carregados:", { 
+        // No Grist docApi.fetchTable, o retorno pode variar. 
+        // Vamos garantir que pegamos o array de registros.
+        const fetchLancamentos = await grist.docApi.fetchTable('Lancamentos');
+        allRecords = Array.isArray(fetchLancamentos) ? fetchLancamentos : (fetchLancamentos.records || []);
+        
+        const fetchBanco = await grist.docApi.fetchTable('Banco');
+        bancoData = Array.isArray(fetchBanco) ? fetchBanco : (fetchBanco.records || []);
+        
+        const fetchCartoes = await grist.docApi.fetchTable('Cartoes');
+        cartoesData = Array.isArray(fetchCartoes) ? fetchCartoes : (fetchCartoes.records || []);
+        
+        console.log("Dados carregados com sucesso:", { 
             lancamentos: allRecords.length, 
             banco: bancoData.length, 
             cartoes: cartoesData.length 
