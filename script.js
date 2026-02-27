@@ -6,16 +6,10 @@ let pieChart, barChart;
 const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400'];
 const RED_COLOR = '#e74c3c';
 
-/**
- * Formata valores para R$
- */
 function formatCurrency(value) {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
 }
 
-/**
- * Obtém os próximos 6 meses (incluindo o atual)
- */
 function getNextMonths(count) {
     const months = [];
     const now = new Date();
@@ -30,9 +24,6 @@ function getNextMonths(count) {
     return months;
 }
 
-/**
- * Inicializa os gráficos
- */
 function initCharts() {
     const pieCtx = document.getElementById('pieChart').getContext('2d');
     pieChart = new Chart(pieCtx, {
@@ -92,45 +83,51 @@ function initCharts() {
 }
 
 /**
- * Processa os dados e atualiza os gráficos
+ * Mapeia o nome do cartão a partir do ID da referência
  */
+function getCardName(cardRef) {
+    if (!cardRef) return 'Sem Cartão';
+    // Se cardRef for um objeto (comum em onRecords mapeado)
+    if (typeof cardRef === 'object' && cardRef.Nome_Cartao) return cardRef.Nome_Cartao;
+    
+    // Se for apenas o ID (comum em fetchTable)
+    const card = cartoesData.find(c => c.id === cardRef || c.NumCartao === cardRef);
+    return card ? card.Nome_Cartao : `Cartão ${cardRef}`;
+}
+
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
-    
-    // 1. Calcular Limite Global (Soma de todos os limites na tabela Banco)
     const globalLimit = bancoData.reduce((sum, row) => sum + (row.Limite || 0), 0);
 
-    // 2. Processar Lançamentos
-    const filteredRecords = selectedCard === 'all' 
-        ? allRecords 
-        : allRecords.filter(r => {
-            const cardName = r.Cartao?.Nome_Cartao || r.Cartao;
-            return cardName === selectedCard;
-        });
-
-    // Pie Chart: Ocupação por cartão
     const occupancyByCard = {};
     let totalOccupied = 0;
+    const next6Months = getNextMonths(6);
+    const projectionData = next6Months.map(() => 0);
 
-    filteredRecords.forEach(r => {
-        const cardName = r.Cartao?.Nome_Cartao || r.Cartao || 'Outros';
-        // Ocupação = Valor Total da Compra - Valor já pago
-        // Se Parcela_Atual é 1, nada foi pago ainda.
-        // Se Parcela_Atual é 2, 1 parcela foi paga.
-        // Ocupação = Valor_Parcela * (Total_Parcelas - Parcela_Atual + 1)
+    allRecords.forEach(r => {
+        const cardName = getCardName(r.Cartao);
+        
+        // Se houver filtro e não for o cartão selecionado, pula
+        if (selectedCard !== 'all' && cardName !== selectedCard) return;
+
+        const installmentValue = r.Valor_Parcela || 0;
         const totalInstallments = r.Total_Parcelas || 1;
         const currentInstallment = r.Parcela_Atual || 1;
-        const installmentValue = r.Valor_Parcela || 0;
+        const remainingCount = Math.max(0, totalInstallments - currentInstallment + 1);
         
-        const remainingValue = installmentValue * (totalInstallments - currentInstallment + 1);
-        
+        // Cálculo de Ocupação (Saldo Devedor)
+        const remainingValue = installmentValue * remainingCount;
         occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + remainingValue;
         totalOccupied += remainingValue;
+
+        // Projeção de Faturas
+        for (let i = 0; i < Math.min(remainingCount, 6); i++) {
+            projectionData[i] += installmentValue;
+        }
     });
 
-    const availableLimit = Math.max(0, globalLimit - totalOccupied);
-
     // Atualizar Pie Chart
+    const availableLimit = Math.max(0, globalLimit - totalOccupied);
     const pieLabels = Object.keys(occupancyByCard);
     const pieData = Object.values(occupancyByCard);
     const pieColors = pieLabels.map((_, i) => COLORS[i % COLORS.length]);
@@ -144,40 +141,18 @@ async function updateDashboard() {
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
-    // Bar Chart: Projeção 6 meses
-    const next6Months = getNextMonths(6);
-    const projectionData = next6Months.map(() => 0);
-
-    filteredRecords.forEach(r => {
-        const installmentValue = r.Valor_Parcela || 0;
-        const totalInstallments = r.Total_Parcelas || 1;
-        const currentInstallment = r.Parcela_Atual || 1;
-        
-        // Quantas parcelas ainda faltam (incluindo a atual)
-        const remainingCount = totalInstallments - currentInstallment + 1;
-        
-        // Somar nos próximos meses
-        for (let i = 0; i < Math.min(remainingCount, 6); i++) {
-            projectionData[i] += installmentValue;
-        }
-    });
-
+    // Atualizar Bar Chart
     barChart.data.labels = next6Months.map(m => m.name);
     barChart.data.datasets[0].data = projectionData;
     barChart.update();
 }
 
-/**
- * Popula o dropdown de cartões
- */
 function populateFilter() {
     const filter = document.getElementById('cardFilter');
-    const cards = [...new Set(allRecords.map(r => r.Cartao?.Nome_Cartao || r.Cartao))].filter(Boolean);
+    const currentSelection = filter.value;
+    const cards = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].filter(Boolean);
     
-    // Limpar opções exceto a primeira
-    while (filter.options.length > 1) {
-        filter.remove(1);
-    }
+    while (filter.options.length > 1) filter.remove(1);
 
     cards.sort().forEach(card => {
         const opt = document.createElement('option');
@@ -185,35 +160,24 @@ function populateFilter() {
         opt.textContent = card;
         filter.appendChild(opt);
     });
+    filter.value = currentSelection;
 }
 
-// Configuração do Grist
-grist.ready({
-    requiredAccess: 'read table',
-    columns: [
-        { name: 'Cartao', type: 'Reference' },
-        { name: 'Valor_Parcela', type: 'Numeric' },
-        { name: 'Total_Parcelas', type: 'Numeric' },
-        { name: 'Parcela_Atual', type: 'Numeric' }
-    ]
-});
+grist.ready({ requiredAccess: 'full' });
 
 grist.onRecords(async (records) => {
-    allRecords = records;
-    
-    // Tenta buscar dados das outras tabelas
     try {
+        // Busca todas as tabelas para garantir sincronia
+        allRecords = await grist.docApi.fetchTable('Lancamentos');
         bancoData = await grist.docApi.fetchTable('Banco');
         cartoesData = await grist.docApi.fetchTable('Cartoes');
+        
+        if (!pieChart) initCharts();
+        populateFilter();
+        updateDashboard();
     } catch (e) {
-        console.warn("Não foi possível buscar tabelas Banco/Cartoes diretamente. Certifique-se que os nomes estão corretos.", e);
-        // Se falhar, tentamos trabalhar apenas com o que temos nos records (joined data)
+        console.error("Erro ao buscar dados do Grist:", e);
     }
-
-    if (!pieChart) initCharts();
-    populateFilter();
-    updateDashboard();
 });
 
-// Event Listeners
 document.getElementById('cardFilter').addEventListener('change', updateDashboard);
