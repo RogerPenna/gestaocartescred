@@ -83,21 +83,28 @@ function initCharts() {
 }
 
 /**
- * Mapeia o nome do cartão a partir do ID da referência
+ * Tenta obter o nome do cartão a partir do ID ou objeto de referência
  */
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
-    // Se cardRef for um objeto (comum em onRecords mapeado)
+    
+    // Se for um ID (número), busca na tabela de cartões
+    if (typeof cardRef === 'number') {
+        const card = cartoesData.find(c => c.id === cardRef);
+        return card ? card.fields.Nome_Cartao : `ID: ${cardRef}`;
+    }
+    
+    // Se já for um objeto vindo do onRecords (mapeado)
     if (typeof cardRef === 'object' && cardRef.Nome_Cartao) return cardRef.Nome_Cartao;
     
-    // Se for apenas o ID (comum em fetchTable)
-    const card = cartoesData.find(c => c.id === cardRef || c.NumCartao === cardRef);
-    return card ? card.Nome_Cartao : `Cartão ${cardRef}`;
+    return 'Cartão Indefinido';
 }
 
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
-    const globalLimit = bancoData.reduce((sum, row) => sum + (row.Limite || 0), 0);
+    
+    // Banco Limite: fetchTable retorna array de {id, fields: {Limite, ...}}
+    const globalLimit = bancoData.reduce((sum, row) => sum + (row.fields.Limite || 0), 0);
 
     const occupancyByCard = {};
     let totalOccupied = 0;
@@ -105,22 +112,24 @@ async function updateDashboard() {
     const projectionData = next6Months.map(() => 0);
 
     allRecords.forEach(r => {
-        const cardName = getCardName(r.Cartao);
+        const f = r.fields; // Atalho para os campos
+        const cardName = getCardName(f.Cartao);
         
-        // Se houver filtro e não for o cartão selecionado, pula
         if (selectedCard !== 'all' && cardName !== selectedCard) return;
 
-        const installmentValue = r.Valor_Parcela || 0;
-        const totalInstallments = r.Total_Parcelas || 1;
-        const currentInstallment = r.Parcela_Atual || 1;
+        const installmentValue = f.Valor_Parcela || 0;
+        const totalInstallments = f.Total_Parcelas || 1;
+        const currentInstallment = f.Parcela_Atual || 1;
+        
+        // Cálculo de parcelas restantes (incluindo a atual)
         const remainingCount = Math.max(0, totalInstallments - currentInstallment + 1);
         
-        // Cálculo de Ocupação (Saldo Devedor)
+        // Ocupação do limite (Saldo Devedor total)
         const remainingValue = installmentValue * remainingCount;
         occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + remainingValue;
         totalOccupied += remainingValue;
 
-        // Projeção de Faturas
+        // Projeção: soma o valor da parcela nos próximos meses enquanto houver parcelas
         for (let i = 0; i < Math.min(remainingCount, 6); i++) {
             projectionData[i] += installmentValue;
         }
@@ -132,9 +141,11 @@ async function updateDashboard() {
     const pieData = Object.values(occupancyByCard);
     const pieColors = pieLabels.map((_, i) => COLORS[i % COLORS.length]);
 
-    pieLabels.push('Limite Disponível');
-    pieData.push(availableLimit);
-    pieColors.push(RED_COLOR);
+    if (availableLimit > 0 || totalOccupied === 0) {
+        pieLabels.push('Limite Disponível');
+        pieData.push(availableLimit);
+        pieColors.push(RED_COLOR);
+    }
 
     pieChart.data.labels = pieLabels;
     pieChart.data.datasets[0].data = pieData;
@@ -150,7 +161,7 @@ async function updateDashboard() {
 function populateFilter() {
     const filter = document.getElementById('cardFilter');
     const currentSelection = filter.value;
-    const cards = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].filter(Boolean);
+    const cards = [...new Set(allRecords.map(r => getCardName(r.fields.Cartao)))].filter(Boolean);
     
     while (filter.options.length > 1) filter.remove(1);
 
@@ -160,23 +171,33 @@ function populateFilter() {
         opt.textContent = card;
         filter.appendChild(opt);
     });
-    filter.value = currentSelection;
+    
+    if (cards.includes(currentSelection)) {
+        filter.value = currentSelection;
+    }
 }
 
 grist.ready({ requiredAccess: 'full' });
 
 grist.onRecords(async (records) => {
     try {
-        // Busca todas as tabelas para garantir sincronia
+        console.log("Recebendo atualização do Grist...");
+        // fetchTable retorna array de objetos {id: n, fields: {...}}
         allRecords = await grist.docApi.fetchTable('Lancamentos');
         bancoData = await grist.docApi.fetchTable('Banco');
         cartoesData = await grist.docApi.fetchTable('Cartoes');
         
+        console.log("Dados carregados:", { 
+            lancamentos: allRecords.length, 
+            banco: bancoData.length, 
+            cartoes: cartoesData.length 
+        });
+
         if (!pieChart) initCharts();
         populateFilter();
         updateDashboard();
     } catch (e) {
-        console.error("Erro ao buscar dados do Grist:", e);
+        console.error("Erro detalhado ao buscar dados do Grist:", e);
     }
 });
 
