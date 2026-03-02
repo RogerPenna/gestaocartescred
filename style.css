@@ -68,3 +68,47 @@ main {
 canvas {
     max-width: 100%;
 }
+
+/* Debug Section */
+.debug-section {
+    margin-top: 40px;
+    background: #2c3e50;
+    color: #ecf0f1;
+    border-radius: 8px;
+    padding: 15px;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #34495e;
+    padding-bottom: 5px;
+}
+
+.debug-log {
+    height: 150px;
+    overflow-y: auto;
+    background: #1a252f;
+    padding: 10px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.debug-header button {
+    background: #34495e;
+    border: none;
+    color: white;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+}
+
+.debug-header button:hover {
+    background: #4e6a85;
+}
