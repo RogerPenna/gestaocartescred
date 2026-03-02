@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestão de Cartões v2.4.0</title>
+    <title>Gestão de Cartões v2.5.0</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -13,12 +13,13 @@
         <nav class="tabs">
             <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
             <button class="tab-btn" onclick="switchTab('entry')">Novo Lançamento</button>
+            <button class="tab-btn" onclick="switchTab('history')">Histórico / Cancelar</button>
         </nav>
 
         <!-- ABA DASHBOARD -->
         <div id="tab-dashboard" class="tab-content active">
             <header>
-                <h1>Gestão de Cartões</h1>
+                <h1>Dashboard Financeiro</h1>
                 <div class="filters">
                     <label for="cardFilter">Filtrar:</label>
                     <select id="cardFilter">
@@ -41,9 +42,7 @@
 
         <!-- ABA INSERÇÃO -->
         <div id="tab-entry" class="tab-content">
-            <header>
-                <h1>Novo Lançamento Parcelado</h1>
-            </header>
+            <header><h1>Novo Lançamento Parcelado</h1></header>
             <section class="entry-form">
                 <div class="form-grid">
                     <div class="field">
@@ -60,7 +59,7 @@
                     </div>
                     <div class="field">
                         <label>Valor Total (R$):</label>
-                        <input type="number" id="inTotal" step="0.01">
+                        <input type="number" id="inTotal" step="0.01" placeholder="Negativo para estorno">
                     </div>
                     <div class="field">
                         <label>Parcelas:</label>
@@ -70,31 +69,43 @@
                 <div class="form-actions">
                     <button id="btnPreview" class="btn-secondary">Gerar Listagem</button>
                 </div>
-
                 <div id="previewSection" style="display: none;">
                     <h3>Prévia das Parcelas</h3>
                     <div class="table-scroll">
                         <table id="previewTable">
-                            <thead>
-                                <tr>
-                                    <th>Data</th>
-                                    <th>Descritivo (Regex)</th>
-                                    <th>Valor Parcela</th>
-                                </tr>
-                            </thead>
+                            <thead><tr><th>Data</th><th>Descritivo</th><th>Valor</th></tr></thead>
                             <tbody></tbody>
                         </table>
                     </div>
                     <div class="form-actions">
-                        <button id="btnSave" class="btn-primary">Confirmar e Criar no Grist</button>
+                        <button id="btnSave" class="btn-primary">Confirmar no Grist</button>
                     </div>
                 </div>
             </section>
         </div>
 
+        <!-- ABA HISTÓRICO -->
+        <div id="tab-history" class="tab-content">
+            <header><h1>Histórico Recente</h1></header>
+            <div class="table-scroll">
+                <table id="historyTable">
+                    <thead>
+                        <tr>
+                            <th>Data</th>
+                            <th>Cartão</th>
+                            <th>Descritivo</th>
+                            <th>Valor</th>
+                            <th>Ação</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
         <footer class="debug-section">
             <div class="debug-header">
-                <span>Versão: <span id="appVersion">2.4.0</span></span>
+                <span>Versão: <span id="appVersion">2.5.0</span></span>
                 <button id="copyLog">Copiar Log</button>
                 <button id="clearLog">Limpar</button>
             </div>

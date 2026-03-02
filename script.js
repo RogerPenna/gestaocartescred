@@ -1,14 +1,12 @@
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.5.0";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
 let pieChart, barChart;
 
-// Dashboard States
+// States
 let viewLevel = 'macro'; 
 let drilledCard = null;
-
-// Entry States
 let installmentPreview = [];
 
 const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400', '#16a085', '#27ae60', '#2980b9', '#8e44ad', '#2c3e50'];
@@ -27,22 +25,16 @@ function logDebug(message, data = null) {
     logEl.prepend(div);
 }
 
-/**
- * Tab Management
- */
 function switchTab(tabId) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-    
     document.getElementById(`tab-${tabId}`).classList.add('active');
     document.querySelector(`button[onclick="switchTab('${tabId}')"]`).classList.add('active');
     
     if (tabId === 'dashboard') updateDashboard();
+    if (tabId === 'history') updateHistory();
 }
 
-/**
- * Grist Utilities
- */
 function colDataToRows(colData) {
     if (!colData || !colData.id) return [];
     const rows = [];
@@ -68,7 +60,15 @@ function getValue(obj, target) {
 
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
+    // Se for [ID, Label] (vindo do Grist)
     if (Array.isArray(cardRef) && cardRef.length > 1) return cardRef[1];
+    
+    // Se for um objeto de linha já carregado (fix do Bug [object Object])
+    if (typeof cardRef === 'object' && !Array.isArray(cardRef)) {
+        const name = getValue(cardRef, 'Nome_Cartao') || getValue(cardRef, 'NumCartao');
+        if (name) return name;
+    }
+
     const id = Array.isArray(cardRef) ? cardRef[0] : (typeof cardRef === 'number' ? cardRef : null);
     if (id && cartoesData.length > 0) {
         const card = cartoesData.find(c => c.id === id);
@@ -82,7 +82,7 @@ function getMonthDiff(startDate, targetDate) {
 }
 
 /**
- * Dashboard Logic
+ * DASHBOARD
  */
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
@@ -127,10 +127,8 @@ async function updateDashboard() {
     });
 
     let pieLabels = [], pieData = [], pieColors = [];
-    const backBtn = document.getElementById('backButtonContainer');
-
     if (viewLevel === 'macro') {
-        backBtn.style.display = 'none';
+        document.getElementById('backButtonContainer').style.display = 'none';
         pieLabels = Object.keys(occupancyByCard);
         pieData = Object.values(occupancyByCard);
         pieColors = pieLabels.map(name => cardColorMap[name]);
@@ -140,19 +138,13 @@ async function updateDashboard() {
             pieColors.push(RED_COLOR);
         }
     } else {
-        backBtn.style.display = 'block';
+        document.getElementById('backButtonContainer').style.display = 'block';
         detailItems.sort((a, b) => b.value - a.value);
         const top10 = detailItems.slice(0, 10);
-        const rest = detailItems.slice(10);
         pieLabels = top10.map(i => i.label);
         pieData = top10.map(i => i.value);
         const baseColor = cardColorMap[drilledCard];
         pieColors = top10.map((_, i) => `${baseColor}${Math.floor((1 - i*0.08) * 255).toString(16).padStart(2, '0')}`);
-        if (rest.length > 0) {
-            pieLabels.push("Outros");
-            pieData.push(rest.reduce((s, i) => s + i.value, 0));
-            pieColors.push('#95a5a6');
-        }
     }
 
     pieChart.data.labels = pieLabels;
@@ -164,15 +156,13 @@ async function updateDashboard() {
     barChart.data.datasets = Object.keys(projectionByCard).sort().map(name => ({
         label: name,
         data: projectionByCard[name],
-        backgroundColor: cardColorMap[name],
-        borderColor: name === drilledCard ? '#000' : 'transparent',
-        borderWidth: name === drilledCard ? 2 : 0
+        backgroundColor: cardColorMap[name]
     }));
     barChart.update();
 }
 
 /**
- * DATA ENTRY LOGIC
+ * ENTRY
  */
 function generatePreview() {
     const cardId = parseInt(document.getElementById('inCard').value);
@@ -182,13 +172,11 @@ function generatePreview() {
     const installments = parseInt(document.getElementById('inInstallments').value);
 
     if (!cardId || !dateStr || !baseDesc || isNaN(totalVal) || isNaN(installments)) {
-        alert("Por favor, preencha todos os campos corretamente.");
-        return;
+        alert("Preencha todos os campos corretamente."); return;
     }
 
     const valorParcela = parseFloat((totalVal / installments).toFixed(2));
     const startDate = new Date(dateStr + "T00:00:00");
-    
     installmentPreview = [];
     const tbody = document.querySelector('#previewTable tbody');
     tbody.innerHTML = '';
@@ -196,50 +184,63 @@ function generatePreview() {
     for (let i = 1; i <= installments; i++) {
         const currentDate = new Date(startDate);
         currentDate.setMonth(startDate.getMonth() + (i - 1));
-        
-        // Formato para Regex do Grist: "Descritivo 01 10"
-        const installmentSuffix = `${String(i).padStart(2, '0')} ${String(installments).padStart(2, '0')}`;
-        const finalDesc = `${baseDesc} ${installmentSuffix}`;
+        const finalDesc = `${baseDesc} ${String(i).padStart(2, '0')} ${String(installments).padStart(2, '0')}`;
         const dateIso = currentDate.toISOString().split('T')[0];
 
-        installmentPreview.push({
-            Cartao: cardId,
-            Data: dateIso,
-            Descritivo: finalDesc,
-            Valor_Parcela: valorParcela,
-            Total_Parcelas: installments
-        });
-
+        installmentPreview.push({ Cartao: cardId, Data: dateIso, Descritivo: finalDesc, Valor_Parcela: valorParcela, Total_Parcelas: installments });
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${currentDate.toLocaleDateString('pt-BR')}</td><td>${finalDesc}</td><td>${formatCurrency(valorParcela)}</td>`;
+        tr.innerHTML = `<td>${currentDate.toLocaleDateString('pt-BR')}</td><td>${finalDesc}</td><td class="${valorParcela < 0 ? 'negative-value' : ''}">${formatCurrency(valorParcela)}</td>`;
         tbody.appendChild(tr);
     }
-
     document.getElementById('previewSection').style.display = 'block';
 }
 
 async function saveToGrist() {
-    if (installmentPreview.length === 0) return;
-    
-    logDebug(`Salvando ${installmentPreview.length} registros no Grist...`);
     try {
         await grist.docApi.addRecords('Lancamentos', installmentPreview.map(p => ({ fields: p })));
-        logDebug("Sucesso ao salvar no Grist!");
-        alert("Lançamentos criados com sucesso!");
-        
-        // Reset form e volta pro dashboard
+        alert("Lançamento salvo com sucesso!");
         document.getElementById('tab-entry').querySelectorAll('input').forEach(i => i.value = '');
-        document.getElementById('inInstallments').value = '1';
         document.getElementById('previewSection').style.display = 'none';
         switchTab('dashboard');
-    } catch (e) {
-        logDebug("Erro ao salvar no Grist:", e.message);
-        alert("Erro ao salvar: " + e.message);
+    } catch (e) { alert("Erro ao salvar: " + e.message); }
+}
+
+/**
+ * HISTORY
+ */
+function updateHistory() {
+    const tbody = document.querySelector('#historyTable tbody');
+    tbody.innerHTML = '';
+    
+    // Mostra os últimos 20 lançamentos ordenados por ID (mais recentes primeiro)
+    const sorted = [...allRecords].sort((a,b) => b.id - a.id).slice(0, 30);
+    
+    sorted.forEach(r => {
+        const val = getValue(r, 'Valor_Parcela') || 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${new Date(getValue(r, 'Data')).toLocaleDateString('pt-BR')}</td>
+            <td>${getCardName(getValue(r, 'Cartao'))}</td>
+            <td>${getValue(r, 'Descritivo')}</td>
+            <td class="${val < 0 ? 'negative-value' : ''}">${formatCurrency(val)}</td>
+            <td><button class="btn-danger" onclick="deleteEntry(${r.id})">Excluir</button></td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function deleteEntry(recordId) {
+    if (confirm("Deseja realmente excluir este lançamento? Esta ação não pode ser desfeita.")) {
+        try {
+            await grist.docApi.deleteRecords('Lancamentos', [recordId]);
+            logDebug(`Registro ${recordId} excluído.`);
+            updateHistory();
+        } catch (e) { alert("Erro ao excluir: " + e.message); }
     }
 }
 
 /**
- * Setup & Init
+ * UTILS
  */
 function getNextMonths(count) {
     const months = []; const now = new Date();
@@ -288,33 +289,34 @@ grist.onRecords(async (records) => {
 
         if (!pieChart || !barChart) initCharts();
         
-        // Populate Filtros e Dropdowns
-        const cardFilter = document.getElementById('cardFilter');
+        // Popula Dropdowns (Correção de Bug)
         const inCardSelect = document.getElementById('inCard');
-        
+        const cardFilter = document.getElementById('cardFilter');
+
         if (cardFilter.options.length <= 1) {
+            // Usa os dados de cartoesData diretamente para o nome
             const cards = cartoesData.map(c => ({ id: c.id, name: getCardName(c) })).sort((a,b) => a.name.localeCompare(b.name));
             
-            cardFilter.innerHTML = '<option value="all">Todos os Cartões</option>';
             inCardSelect.innerHTML = '<option value="">Selecione um cartão...</option>';
+            cardFilter.innerHTML = '<option value="all">Todos os Cartões</option>';
 
             cards.forEach(c => {
                 const opt1 = document.createElement('option');
-                opt1.value = c.name; opt1.textContent = c.name;
-                cardFilter.appendChild(opt1);
+                opt1.value = c.id; opt1.textContent = c.name;
+                inCardSelect.appendChild(opt1);
 
                 const opt2 = document.createElement('option');
-                opt2.value = c.id; opt2.textContent = c.name;
-                inCardSelect.appendChild(opt2);
+                opt2.value = c.name; opt2.textContent = c.name;
+                cardFilter.appendChild(opt2);
             });
         }
         
-        // Data default para hoje
         if (!document.getElementById('inDate').value) {
             document.getElementById('inDate').value = new Date().toISOString().split('T')[0];
         }
 
         updateDashboard();
+        if (document.getElementById('tab-history').classList.contains('active')) updateHistory();
     } catch (e) { logDebug(`ERRO GERAL: ${e.message}`); }
 });
 
@@ -328,3 +330,4 @@ document.getElementById('copyLog').onclick = () => {
 };
 
 window.switchTab = switchTab;
+window.deleteEntry = deleteEntry;
