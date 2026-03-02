@@ -1,4 +1,4 @@
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
@@ -37,28 +37,19 @@ function getValue(obj, target) {
 
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
-    // O Grist retorna referências como ID (número) ou [ID, Label]
     const id = Array.isArray(cardRef) ? cardRef[0] : (typeof cardRef === 'number' ? cardRef : null);
-    
     if (id) {
         const card = cartoesData.find(c => c.id === id);
-        if (card) {
-            return getValue(card, 'Nome_Cartao') || getValue(card, 'NumCartao') || `Cartão ${id}`;
-        }
+        if (card) return getValue(card, 'Nome_Cartao') || getValue(card, 'NumCartao') || `Cartão ${id}`;
     }
-    
     if (typeof cardRef === 'object' && cardRef.label) return cardRef.label;
     if (typeof cardRef === 'string') return cardRef;
-    
     return 'Cartão Indefinido';
 }
 
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
-    
-    // Soma de todos os limites na tabela Banco
     const globalLimit = bancoData.reduce((sum, row) => sum + (getValue(row, 'Limite') || 0), 0);
-
     const occupancyByCard = {};
     let totalOccupied = 0;
     const next6Months = getNextMonths(6);
@@ -67,29 +58,21 @@ async function updateDashboard() {
     allRecords.forEach(r => {
         const cardRef = getValue(r, 'Cartao');
         const cardName = getCardName(cardRef);
-        
         if (selectedCard !== 'all' && cardName !== selectedCard) return;
-
         const installmentValue = getValue(r, 'Valor_Parcela') || getValue(r, 'Valor Parcela') || 0;
         const totalInstallments = getValue(r, 'Total_Parcelas') || 1;
         const currentInstallment = getValue(r, 'Parcela_Atual') || 1;
-        
         const remainingCount = Math.max(0, totalInstallments - currentInstallment + 1);
         const remainingValue = installmentValue * remainingCount;
-        
         if (remainingValue > 0) {
             occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + remainingValue;
             totalOccupied += remainingValue;
         }
-
-        for (let i = 0; i < Math.min(remainingCount, 6); i++) {
-            projectionData[i] += installmentValue;
-        }
+        for (let i = 0; i < Math.min(remainingCount, 6); i++) projectionData[i] += installmentValue;
     });
 
-    logDebug(`Dashboard: Limite Global=${globalLimit}, Total Ocupado=${totalOccupied.toFixed(2)}`);
+    logDebug(`Dashboard: Limite=${globalLimit}, Ocupado=${totalOccupied.toFixed(2)}`);
 
-    // Atualizar Pie Chart
     const availableLimit = Math.max(0, globalLimit - totalOccupied);
     const pieLabels = Object.keys(occupancyByCard);
     const pieData = Object.values(occupancyByCard);
@@ -106,7 +89,6 @@ async function updateDashboard() {
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
-    // Atualizar Bar Chart
     barChart.data.labels = next6Months.map(m => m.name);
     barChart.data.datasets[0].data = projectionData;
     barChart.update();
@@ -116,7 +98,6 @@ function populateFilter() {
     const filter = document.getElementById('cardFilter');
     const currentSelection = filter.value;
     const cards = [...new Set(allRecords.map(r => getCardName(getValue(r, 'Cartao'))))].filter(c => c && c !== 'Sem Cartão');
-    
     while (filter.options.length > 1) filter.remove(1);
     cards.sort().forEach(card => {
         const opt = document.createElement('option');
@@ -140,38 +121,17 @@ function getNextMonths(count) {
 function initCharts() {
     if (pieChart) pieChart.destroy();
     if (barChart) barChart.destroy();
-
     const pieCtx = document.getElementById('pieChart').getContext('2d');
     pieChart = new Chart(pieCtx, {
         type: 'pie',
         data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
-        options: { 
-            responsive: true, 
-            plugins: { 
-                title: { display: true, text: 'Ocupação do Limite Global' },
-                tooltip: {
-                    callbacks: {
-                        label: (ctx) => {
-                            const val = ctx.parsed || 0;
-                            const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
-                            const perc = ((val/total)*100).toFixed(1);
-                            return `${ctx.label}: ${formatCurrency(val)} (${perc}%)`;
-                        }
-                    }
-                }
-            } 
-        }
+        options: { responsive: true, plugins: { title: { display: true, text: 'Ocupação do Limite Global' } } }
     });
-
     const barCtx = document.getElementById('barChart').getContext('2d');
     barChart = new Chart(barCtx, {
         type: 'bar',
         data: { labels: [], datasets: [{ label: 'Projeção de Faturas', data: [], backgroundColor: '#3498db' }] },
-        options: { 
-            responsive: true, 
-            plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } },
-            scales: { y: { beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } }
-        }
+        options: { responsive: true, plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } }, scales: { y: { beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } } }
     });
 }
 
@@ -181,36 +141,26 @@ grist.onRecords(async (records) => {
     try {
         logDebug(`Iniciando v${APP_VERSION}`);
         
-        // IDs confirmados pelos logs anteriores
-        const TABLE_IDS = {
-            lancamentos: 'Lancamentos',
-            banco: 'Banco',
-            cartoes: 'Cartoes'
-        };
+        // 1. Listar todas as tabelas (importante para diagnosticar o erro de chave)
+        const tables = await grist.docApi.listTables();
+        logDebug("Tabelas disponíveis:", tables);
 
-        // Carregar Tabelas de Referência
+        // 2. Buscar dados (Tenta IDs comuns se o fetch falhar)
         try {
-            const fBanco = await grist.docApi.fetchTable(TABLE_IDS.banco);
+            const fBanco = await grist.docApi.fetchTable('Banco') || await grist.docApi.fetchTable('Bancos');
             bancoData = Array.isArray(fBanco) ? fBanco : (fBanco.records || []);
-            logDebug(`Bancos carregados: ${bancoData.length}`);
-        } catch(e) { logDebug(`Erro Tabela Banco: ${e.message}`); }
+            logDebug(`Bancos: ${bancoData.length}`);
+        } catch(e) { logDebug(`Erro Banco: ${e.message}`); }
 
         try {
-            const fCartoes = await grist.docApi.fetchTable(TABLE_IDS.cartoes);
+            const fCartoes = await grist.docApi.fetchTable('Cartoes');
             cartoesData = Array.isArray(fCartoes) ? fCartoes : (fCartoes.records || []);
-            logDebug(`Cartões carregados: ${cartoesData.length}`);
-        } catch(e) { logDebug(`Erro Tabela Cartoes: ${e.message}`); }
+            logDebug(`Cartões: ${cartoesData.length}`);
+        } catch(e) { logDebug(`Erro Cartoes: ${e.message}`); }
 
-        // Carregar Lançamentos (Usa onRecords como fonte primária para garantir sincronia com filtros do Grist)
         if (records && records.length > 0) {
             allRecords = records;
-            logDebug(`Lançamentos carregados (onRecords): ${allRecords.length}`);
-        } else {
-            try {
-                const fLanc = await grist.docApi.fetchTable(TABLE_IDS.lancamentos);
-                allRecords = Array.isArray(fLanc) ? fLanc : (fLanc.records || []);
-                logDebug(`Lançamentos carregados (fetchTable): ${allRecords.length}`);
-            } catch(e) { logDebug(`Erro Tabela Lancamentos: ${e.message}`); }
+            logDebug(`Lançamentos: ${allRecords.length}`);
         }
 
         if (!pieChart || !barChart) initCharts();
