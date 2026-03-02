@@ -83,16 +83,27 @@ function initCharts() {
 }
 
 /**
- * Busca um valor em um objeto de campos de forma resiliente
- * (ignora acentos, espaços, underscores e maiúsculas)
+ * Busca um valor de forma resiliente tentando:
+ * 1. O nome exato (ID)
+ * 2. O nome normalizado (sem acento/espaço/case)
  */
-function getFlexField(fields, target) {
+function getValue(obj, target) {
+    if (!obj) return undefined;
+    
+    // Se o objeto for um registro do Grist, tenta procurar em .fields ou no topo
+    const data = obj.fields || obj;
+    
+    // 1. Tentativa Direta (ID padrão do Grist)
+    const directKey = target.replace(/ /g, '_');
+    if (data[directKey] !== undefined) return data[directKey];
+
+    // 2. Busca Normalizada (Resiliente)
     const normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\s_]/g, "").toLowerCase();
     const normalizedTarget = normalize(target);
     
-    for (let key in fields) {
+    for (let key in data) {
         if (normalize(key) === normalizedTarget) {
-            return fields[key];
+            return data[key];
         }
     }
     return undefined;
@@ -104,18 +115,15 @@ function getFlexField(fields, target) {
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
     
-    // Se for um ID (número ou array de 1 elemento vindo do Grist)
     const id = Array.isArray(cardRef) ? cardRef[0] : (typeof cardRef === 'number' ? cardRef : null);
     
     if (id) {
         const card = cartoesData.find(c => c.id === id);
         if (card) {
-            return getFlexField(card.fields, 'Nome_Cartao') || getFlexField(card.fields, 'NumCartao') || `Cartão ${id}`;
+            return getValue(card, 'Nome_Cartao') || getValue(card, 'NumCartao') || `Cartão ${id}`;
         }
-        return `ID: ${id}`;
     }
     
-    // Se já for um objeto vindo do onRecords (mapeado)
     if (typeof cardRef === 'object') {
         return cardRef.Nome_Cartao || cardRef.label || 'Cartão Indefinido';
     }
@@ -126,11 +134,8 @@ function getCardName(cardRef) {
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
     
-    // 1. Calcular Limite Global (Busca 'Limite' na tabela Banco)
-    const globalLimit = bancoData.reduce((sum, row) => {
-        const val = getFlexField(row.fields, 'Limite') || 0;
-        return sum + val;
-    }, 0);
+    // Calcular Limite Global
+    const globalLimit = bancoData.reduce((sum, row) => sum + (getValue(row, 'Limite') || 0), 0);
 
     const occupancyByCard = {};
     let totalOccupied = 0;
@@ -138,15 +143,14 @@ async function updateDashboard() {
     const projectionData = next6Months.map(() => 0);
 
     allRecords.forEach(r => {
-        const f = r.fields;
-        const cardRef = getFlexField(f, 'Cartao');
+        const cardRef = getValue(r, 'Cartao');
         const cardName = getCardName(cardRef);
         
         if (selectedCard !== 'all' && cardName !== selectedCard) return;
 
-        const installmentValue = getFlexField(f, 'Valor_Parcela') || getFlexField(f, 'Valor_Parcela') || 0;
-        const totalInstallments = getFlexField(f, 'Total_Parcelas') || 1;
-        const currentInstallment = getFlexField(f, 'Parcela_Atual') || 1;
+        const installmentValue = getValue(r, 'Valor_Parcela') || 0;
+        const totalInstallments = getValue(r, 'Total_Parcelas') || 1;
+        const currentInstallment = getValue(r, 'Parcela_Atual') || 1;
         
         const remainingCount = Math.max(0, totalInstallments - currentInstallment + 1);
         const remainingValue = installmentValue * remainingCount;
@@ -156,13 +160,12 @@ async function updateDashboard() {
             totalOccupied += remainingValue;
         }
 
-        // Projeção
         for (let i = 0; i < Math.min(remainingCount, 6); i++) {
             projectionData[i] += installmentValue;
         }
     });
 
-    console.log("Resumo de Cálculo:", { globalLimit, totalOccupied, occupancyByCard });
+    console.log("Calculado:", { globalLimit, totalOccupied, cartoes: Object.keys(occupancyByCard).length });
 
     // Atualizar Pie Chart
     const availableLimit = Math.max(0, globalLimit - totalOccupied);
@@ -170,7 +173,6 @@ async function updateDashboard() {
     const pieData = Object.values(occupancyByCard);
     const pieColors = pieLabels.map((_, i) => COLORS[i % COLORS.length]);
 
-    // Sempre mostrar o disponível se houver limite global
     if (globalLimit > 0) {
         pieLabels.push('Limite Disponível');
         pieData.push(availableLimit);
@@ -191,7 +193,7 @@ async function updateDashboard() {
 function populateFilter() {
     const filter = document.getElementById('cardFilter');
     const currentSelection = filter.value;
-    const cards = [...new Set(allRecords.map(r => getCardName(getFlexField(r.fields, 'Cartao'))))].filter(c => c && c !== 'Sem Cartão');
+    const cards = [...new Set(allRecords.map(r => getCardName(getValue(r, 'Cartao'))))].filter(c => c && c !== 'Sem Cartão');
     
     while (filter.options.length > 1) filter.remove(1);
 
@@ -202,10 +204,31 @@ function populateFilter() {
         filter.appendChild(opt);
     });
     
-    if (cards.includes(currentSelection)) {
-        filter.value = currentSelection;
-    }
+    if (cards.includes(currentSelection)) filter.value = currentSelection;
 }
+
+grist.ready({ requiredAccess: 'full' });
+
+grist.onRecords(async (records) => {
+    try {
+        const fetchLancamentos = await grist.docApi.fetchTable('Lancamentos');
+        allRecords = Array.isArray(fetchLancamentos) ? fetchLancamentos : (fetchLancamentos.records || []);
+        
+        const fetchBanco = await grist.docApi.fetchTable('Banco');
+        bancoData = Array.isArray(fetchBanco) ? fetchBanco : (fetchBanco.records || []);
+        
+        const fetchCartoes = await grist.docApi.fetchTable('Cartoes');
+        cartoesData = Array.isArray(fetchCartoes) ? fetchCartoes : (fetchCartoes.records || []);
+        
+        console.log("Amostra Lancamentos:", allRecords[0]);
+
+        if (!pieChart) initCharts();
+        populateFilter();
+        updateDashboard();
+    } catch (e) {
+        console.error("Erro no Widget:", e);
+    }
+});
 
 grist.ready({ requiredAccess: 'full' });
 
