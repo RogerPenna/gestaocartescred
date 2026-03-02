@@ -1,4 +1,4 @@
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
@@ -7,9 +7,6 @@ let pieChart, barChart;
 const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400'];
 const RED_COLOR = '#e74c3c';
 
-/**
- * LOGGING VISUAL
- */
 function logDebug(message, data = null) {
     const logEl = document.getElementById('debugLog');
     if (!logEl) return;
@@ -25,74 +22,71 @@ function logDebug(message, data = null) {
     logEl.prepend(div);
 }
 
-/**
- * LÓGICA GRIST TABLE LENS (Adaptada)
- */
-const GTL = {
-    tables: null,
-    columns: null,
-
-    async init() {
-        logDebug("GTL: Carregando metadados...");
-        try {
-            this.tables = await grist.docApi.fetchTable('_grist_Tables');
-            this.columns = await grist.docApi.fetchTable('_grist_Tables_column');
-            logDebug("GTL: Metadados carregados com sucesso.");
-        } catch (e) {
-            logDebug("GTL ERRO: Falha ao carregar metadados (Full Access?).", e.message);
-            throw e;
-        }
-    },
-
-    getNumericId(tableId) {
-        if (!this.tables?.tableId) return null;
-        const idx = this.tables.tableId.findIndex(t => t === tableId);
-        return idx === -1 ? null : this.tables.id[idx];
-    },
-
-    colDataToRows(colData) {
-        if (!colData || !colData.id) return [];
-        const rows = [];
-        const keys = Object.keys(colData);
-        const numRows = colData.id.length;
-        for (let i = 0; i < numRows; i++) {
-            const r = { id: colData.id[i] };
-            keys.forEach(k => { if (k !== 'id') r[k] = colData[k][i]; });
-            rows.push(r);
-        }
-        return rows;
-    },
-
-    async fetchTable(tableId) {
-        logDebug(`GTL: Buscando tabela ${tableId}...`);
-        const raw = await grist.docApi.fetchTable(tableId);
-        return this.colDataToRows(raw);
+function getValue(obj, target) {
+    if (!obj) return undefined;
+    const data = obj.fields || obj;
+    const directKey = target.replace(/ /g, '_');
+    if (data[directKey] !== undefined) return data[directKey];
+    const normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\s_]/g, "").toLowerCase();
+    const normalizedTarget = normalize(target);
+    for (let key in data) {
+        if (normalize(key) === normalizedTarget) return data[key];
     }
-};
+    return undefined;
+}
 
-/**
- * DASHBOARD LOGIC
- */
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
     if (Array.isArray(cardRef) && cardRef.length > 1) return cardRef[1];
     const id = Array.isArray(cardRef) ? cardRef[0] : (typeof cardRef === 'number' ? cardRef : null);
     if (id && cartoesData.length > 0) {
         const card = cartoesData.find(c => c.id === id);
-        if (card) return card.Nome_Cartao || card.NumCartao || `ID: ${id}`;
+        if (card) return getValue(card, 'Nome_Cartao') || getValue(card, 'NumCartao') || `ID: ${id}`;
     }
     return cardRef.label || String(cardRef);
 }
 
+/**
+ * LÓGICA GRIST TABLE LENS (Engine)
+ */
+const GTL = {
+    tables: null,
+    async init() {
+        try {
+            this.tables = await grist.docApi.fetchTable('_grist_Tables');
+            this.columns = await grist.docApi.fetchTable('_grist_Tables_column');
+        } catch (e) { logDebug("GTL ERRO", e.message); throw e; }
+    },
+    colDataToRows(colData) {
+        if (!colData || !colData.id) return [];
+        const rows = [];
+        const keys = Object.keys(colData);
+        for (let i = 0; i < colData.id.length; i++) {
+            const r = { id: colData.id[i] };
+            keys.forEach(k => { if (k !== 'id') r[k] = colData[k][i]; });
+            rows.push(r);
+        }
+        return rows;
+    },
+    async fetchTable(tableId) {
+        const raw = await grist.docApi.fetchTable(tableId);
+        return this.colDataToRows(raw);
+    }
+};
+
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
+    const globalLimit = bancoData.reduce((sum, row) => sum + (getValue(row, 'Limite') || 0), 0);
     
-    // Banco Limite
-    const globalLimit = bancoData.reduce((sum, row) => sum + (row.Limite || 0), 0);
     const occupancyByCard = {};
+    const projectionByCard = {}; // { CardName: [6 months array] }
     let totalOccupied = 0;
     const next6Months = getNextMonths(6);
-    const projectionData = next6Months.map(() => 0);
+
+    // Lista única de cartões para cores consistentes
+    const uniqueCardNames = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].sort();
+    const cardColorMap = {};
+    uniqueCardNames.forEach((name, i) => cardColorMap[name] = COLORS[i % COLORS.length]);
 
     allRecords.forEach(r => {
         const cardName = getCardName(r.Cartao);
@@ -104,22 +98,24 @@ async function updateDashboard() {
         const faltantes = Math.max(0, totalParc - parcAtual + 1);
         const saldoDevedor = valParcela * faltantes;
         
+        // Ocupação
         if (saldoDevedor > 0) {
             occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + saldoDevedor;
             totalOccupied += saldoDevedor;
         }
 
+        // Projeção Empilhada
+        if (!projectionByCard[cardName]) projectionByCard[cardName] = Array(6).fill(0);
         for (let i = 0; i < Math.min(faltantes, 6); i++) {
-            projectionData[i] += valParcela;
+            projectionByCard[cardName][i] += valParcela;
         }
     });
 
-    logDebug(`Dashboard v${APP_VERSION}: Limite=${globalLimit}, Ocupado=${totalOccupied.toFixed(2)}`);
-
+    // 1. Atualizar Pie Chart
     const availableLimit = Math.max(0, globalLimit - totalOccupied);
     const pieLabels = Object.keys(occupancyByCard);
     const pieData = Object.values(occupancyByCard);
-    const pieColors = pieLabels.map((_, i) => COLORS[i % COLORS.length]);
+    const pieColors = pieLabels.map(name => cardColorMap[name]);
 
     if (globalLimit > 0) {
         pieLabels.push('Limite Disponível');
@@ -132,9 +128,16 @@ async function updateDashboard() {
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
+    // 2. Atualizar Bar Chart (Stacked)
     barChart.data.labels = next6Months.map(m => m.name);
-    barChart.data.datasets[0].data = projectionData;
+    barChart.data.datasets = Object.keys(projectionByCard).map(name => ({
+        label: name,
+        data: projectionByCard[name],
+        backgroundColor: cardColorMap[name]
+    }));
     barChart.update();
+
+    logDebug(`Dashboard v${APP_VERSION} Atualizado.`);
 }
 
 function populateFilter() {
@@ -175,8 +178,15 @@ function initCharts() {
     const barCtx = document.getElementById('barChart').getContext('2d');
     barChart = new Chart(barCtx, {
         type: 'bar',
-        data: { labels: [], datasets: [{ label: 'Projeção de Faturas', data: [], backgroundColor: '#3498db' }] },
-        options: { responsive: true, plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } }, scales: { y: { beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } } }
+        data: { labels: [], datasets: [] },
+        options: { 
+            responsive: true, 
+            scales: { 
+                x: { stacked: true }, 
+                y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } 
+            },
+            plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } }
+        }
     });
 }
 
@@ -184,32 +194,16 @@ grist.ready({ requiredAccess: 'full' });
 
 grist.onRecords(async (records) => {
     try {
-        logDebug(`Iniciando v${APP_VERSION} (Engine GTL)`);
-        
-        // 1. Inicia o motor de metadados
+        logDebug(`Carregando v${APP_VERSION}...`);
         await GTL.init();
-
-        // 2. Busca dados usando a lógica de conversão do GTL
         bancoData = await GTL.fetchTable('Banco');
         cartoesData = await GTL.fetchTable('Cartoes');
-        
-        // Lancamentos (Usa o formato do Grist vindo do onRecords mapeado para objetos simples)
-        allRecords = records.map(r => {
-            const row = { id: r.id };
-            Object.keys(r).forEach(k => {
-                if (k !== 'id' && k !== '_grist_id') row[k] = r[k];
-            });
-            return row;
-        });
-
-        logDebug(`Carga OK: Bancos=${bancoData.length}, Cartões=${cartoesData.length}, Lançamentos=${allRecords.length}`);
+        allRecords = records.map(r => ({ ...r }));
 
         if (!pieChart || !barChart) initCharts();
         populateFilter();
         updateDashboard();
-    } catch (e) {
-        logDebug(`ERRO GTL: ${e.message}`);
-    }
+    } catch (e) { logDebug(`ERRO GTL: ${e.message}`); }
 });
 
 document.getElementById('cardFilter').addEventListener('change', updateDashboard);
