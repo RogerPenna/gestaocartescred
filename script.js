@@ -83,19 +83,42 @@ function initCharts() {
 }
 
 /**
+ * Busca um valor em um objeto de campos de forma resiliente
+ * (ignora acentos, espaços, underscores e maiúsculas)
+ */
+function getFlexField(fields, target) {
+    const normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\s_]/g, "").toLowerCase();
+    const normalizedTarget = normalize(target);
+    
+    for (let key in fields) {
+        if (normalize(key) === normalizedTarget) {
+            return fields[key];
+        }
+    }
+    return undefined;
+}
+
+/**
  * Tenta obter o nome do cartão a partir do ID ou objeto de referência
  */
 function getCardName(cardRef) {
     if (!cardRef) return 'Sem Cartão';
     
-    // Se for um ID (número), busca na tabela de cartões
-    if (typeof cardRef === 'number') {
-        const card = cartoesData.find(c => c.id === cardRef);
-        return card ? card.fields.Nome_Cartao : `ID: ${cardRef}`;
+    // Se for um ID (número ou array de 1 elemento vindo do Grist)
+    const id = Array.isArray(cardRef) ? cardRef[0] : (typeof cardRef === 'number' ? cardRef : null);
+    
+    if (id) {
+        const card = cartoesData.find(c => c.id === id);
+        if (card) {
+            return getFlexField(card.fields, 'Nome_Cartao') || getFlexField(card.fields, 'NumCartao') || `Cartão ${id}`;
+        }
+        return `ID: ${id}`;
     }
     
     // Se já for um objeto vindo do onRecords (mapeado)
-    if (typeof cardRef === 'object' && cardRef.Nome_Cartao) return cardRef.Nome_Cartao;
+    if (typeof cardRef === 'object') {
+        return cardRef.Nome_Cartao || cardRef.label || 'Cartão Indefinido';
+    }
     
     return 'Cartão Indefinido';
 }
@@ -103,8 +126,11 @@ function getCardName(cardRef) {
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
     
-    // Banco Limite: fetchTable retorna array de {id, fields: {Limite, ...}}
-    const globalLimit = bancoData.reduce((sum, row) => sum + (row.fields.Limite || 0), 0);
+    // 1. Calcular Limite Global (Busca 'Limite' na tabela Banco)
+    const globalLimit = bancoData.reduce((sum, row) => {
+        const val = getFlexField(row.fields, 'Limite') || 0;
+        return sum + val;
+    }, 0);
 
     const occupancyByCard = {};
     let totalOccupied = 0;
@@ -112,28 +138,31 @@ async function updateDashboard() {
     const projectionData = next6Months.map(() => 0);
 
     allRecords.forEach(r => {
-        const f = r.fields; // Atalho para os campos
-        const cardName = getCardName(f.Cartao);
+        const f = r.fields;
+        const cardRef = getFlexField(f, 'Cartao');
+        const cardName = getCardName(cardRef);
         
         if (selectedCard !== 'all' && cardName !== selectedCard) return;
 
-        const installmentValue = f.Valor_Parcela || 0;
-        const totalInstallments = f.Total_Parcelas || 1;
-        const currentInstallment = f.Parcela_Atual || 1;
+        const installmentValue = getFlexField(f, 'Valor_Parcela') || getFlexField(f, 'Valor_Parcela') || 0;
+        const totalInstallments = getFlexField(f, 'Total_Parcelas') || 1;
+        const currentInstallment = getFlexField(f, 'Parcela_Atual') || 1;
         
-        // Cálculo de parcelas restantes (incluindo a atual)
         const remainingCount = Math.max(0, totalInstallments - currentInstallment + 1);
-        
-        // Ocupação do limite (Saldo Devedor total)
         const remainingValue = installmentValue * remainingCount;
-        occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + remainingValue;
-        totalOccupied += remainingValue;
+        
+        if (remainingValue > 0) {
+            occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + remainingValue;
+            totalOccupied += remainingValue;
+        }
 
-        // Projeção: soma o valor da parcela nos próximos meses enquanto houver parcelas
+        // Projeção
         for (let i = 0; i < Math.min(remainingCount, 6); i++) {
             projectionData[i] += installmentValue;
         }
     });
+
+    console.log("Resumo de Cálculo:", { globalLimit, totalOccupied, occupancyByCard });
 
     // Atualizar Pie Chart
     const availableLimit = Math.max(0, globalLimit - totalOccupied);
@@ -141,7 +170,8 @@ async function updateDashboard() {
     const pieData = Object.values(occupancyByCard);
     const pieColors = pieLabels.map((_, i) => COLORS[i % COLORS.length]);
 
-    if (availableLimit > 0 || totalOccupied === 0) {
+    // Sempre mostrar o disponível se houver limite global
+    if (globalLimit > 0) {
         pieLabels.push('Limite Disponível');
         pieData.push(availableLimit);
         pieColors.push(RED_COLOR);
@@ -161,7 +191,7 @@ async function updateDashboard() {
 function populateFilter() {
     const filter = document.getElementById('cardFilter');
     const currentSelection = filter.value;
-    const cards = [...new Set(allRecords.map(r => getCardName(r.fields.Cartao)))].filter(Boolean);
+    const cards = [...new Set(allRecords.map(r => getCardName(getFlexField(r.fields, 'Cartao'))))].filter(c => c && c !== 'Sem Cartão');
     
     while (filter.options.length > 1) filter.remove(1);
 
@@ -181,10 +211,6 @@ grist.ready({ requiredAccess: 'full' });
 
 grist.onRecords(async (records) => {
     try {
-        console.log("Recebendo atualização do Grist...");
-        
-        // No Grist docApi.fetchTable, o retorno pode variar. 
-        // Vamos garantir que pegamos o array de registros.
         const fetchLancamentos = await grist.docApi.fetchTable('Lancamentos');
         allRecords = Array.isArray(fetchLancamentos) ? fetchLancamentos : (fetchLancamentos.records || []);
         
@@ -194,17 +220,13 @@ grist.onRecords(async (records) => {
         const fetchCartoes = await grist.docApi.fetchTable('Cartoes');
         cartoesData = Array.isArray(fetchCartoes) ? fetchCartoes : (fetchCartoes.records || []);
         
-        console.log("Dados carregados com sucesso:", { 
-            lancamentos: allRecords.length, 
-            banco: bancoData.length, 
-            cartoes: cartoesData.length 
-        });
+        console.log("Estrutura do primeiro Lançamento:", allRecords[0]?.fields);
 
         if (!pieChart) initCharts();
         populateFilter();
         updateDashboard();
     } catch (e) {
-        console.error("Erro detalhado ao buscar dados do Grist:", e);
+        console.error("Erro no Widget:", e);
     }
 });
 
