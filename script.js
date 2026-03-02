@@ -1,11 +1,14 @@
-const APP_VERSION = "2.2.1";
+const APP_VERSION = "2.3.0";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
 let pieChart, barChart;
-let selectedMonthIndex = null; // null = Global, 0-5 = Mês específico
 
-const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400', '#16a085', '#27ae60', '#2980b9', '#8e44ad', '#2c3e50', '#f39c12', '#e67e22'];
+// Estado do Drill-down
+let viewLevel = 'macro'; // 'macro' (cartões) ou 'detail' (compras de um cartão)
+let drilledCard = null; // Nome do cartão selecionado para detalhe
+
+const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400', '#16a085', '#27ae60', '#2980b9', '#8e44ad', '#2c3e50'];
 const RED_COLOR = '#e74c3c';
 
 function logDebug(message, data = null) {
@@ -21,9 +24,6 @@ function logDebug(message, data = null) {
     logEl.prepend(div);
 }
 
-/**
- * Converte dados de colunas do Grist para Array de Objetos (Rows)
- */
 function colDataToRows(colData) {
     if (!colData || !colData.id) return [];
     const rows = [];
@@ -58,6 +58,16 @@ function getCardName(cardRef) {
     return cardRef.label || String(cardRef);
 }
 
+function generateShades(baseColor, count) {
+    // Função simples para gerar tons baseados em opacidade/luminosidade
+    const shades = [];
+    for (let i = 0; i < count; i++) {
+        const opacity = (1 - (i * 0.08)).toFixed(2);
+        shades.push(`${baseColor}${Math.floor(opacity * 255).toString(16).padStart(2, '0')}`);
+    }
+    return shades;
+}
+
 function getMonthDiff(startDate, targetDate) {
     return (targetDate.getFullYear() - startDate.getFullYear()) * 12 + (targetDate.getMonth() - startDate.getMonth());
 }
@@ -66,11 +76,17 @@ async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
     const globalLimit = bancoData.reduce((sum, row) => sum + (getValue(row, 'Limite') || 0), 0);
     const next6Months = getNextMonths(6);
-    
-    let totalOccupied = 0;
-    const itemsForPie = [];
-    const projectionByCard = {};
     const today = new Date();
+
+    const occupancyByCard = {}; // Para visão Macro
+    const projectionByCard = {}; // Para Barras Empilhadas
+    const detailItems = []; // Para visão Micro (Drill-down)
+    let totalOccupied = 0;
+
+    // Mapa de cores fixas por cartão
+    const uniqueCardNames = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].sort();
+    const cardColorMap = {};
+    uniqueCardNames.forEach((name, i) => cardColorMap[name] = COLORS[i % COLORS.length]);
 
     allRecords.forEach(r => {
         const cardName = getCardName(r.Cartao);
@@ -81,74 +97,86 @@ async function updateDashboard() {
         const totalParc = getValue(r, 'Total_Parcelas') || 1;
         const desc = getValue(r, 'Descritivo') || 'Sem Descrição';
 
-        if (!projectionByCard[cardName]) projectionByCard[cardName] = Array(6).fill(0);
-        
-        for (let i = 0; i < 6; i++) {
-            const targetMonthDate = next6Months[i].date;
-            const diff = getMonthDiff(purchaseDate, targetMonthDate);
-            if (diff >= 0 && diff < totalParc) {
-                projectionByCard[cardName][i] += valParcela;
-                if (selectedMonthIndex === i) {
-                    itemsForPie.push({ label: `${desc} (${cardName})`, value: valParcela });
-                }
+        // Cálculo de saldo devedor (Ocupação Global)
+        const diffDesdeCompra = getMonthDiff(purchaseDate, today);
+        const parcJaPagas = Math.max(0, diffDesdeCompra);
+        const parcRestantes = Math.max(0, totalParc - parcJaPagas);
+        const saldoDevedor = valParcela * parcRestantes;
+
+        if (saldoDevedor > 0) {
+            occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + saldoDevedor;
+            totalOccupied += saldoDevedor;
+            
+            // Se estivermos no modo Drill-down deste cartão
+            if (viewLevel === 'detail' && cardName === drilledCard) {
+                detailItems.push({ label: desc, value: saldoDevedor });
             }
         }
 
-        if (selectedMonthIndex === null) {
-            const diffDesdeCompra = getMonthDiff(purchaseDate, today);
-            const parcJaPagas = Math.max(0, diffDesdeCompra);
-            const parcRestantes = Math.max(0, totalParc - parcJaPagas);
-            const saldoDevedor = valParcela * parcRestantes;
-
-            if (saldoDevedor > 0) {
-                totalOccupied += saldoDevedor;
-                itemsForPie.push({ label: `${desc} (${cardName})`, value: saldoDevedor });
+        // Projeção para Barras
+        if (!projectionByCard[cardName]) projectionByCard[cardName] = Array(6).fill(0);
+        for (let i = 0; i < 6; i++) {
+            const diff = getMonthDiff(purchaseDate, next6Months[i].date);
+            if (diff >= 0 && diff < totalParc) {
+                projectionByCard[cardName][i] += valParcela;
             }
         }
     });
 
-    itemsForPie.sort((a, b) => b.value - a.value);
-    const top10 = itemsForPie.slice(0, 10);
-    const rest = itemsForPie.slice(10);
-    const otherValue = rest.reduce((sum, item) => sum + item.value, 0);
+    // --- Atualizar Pie Chart (Macro vs Micro) ---
+    let pieLabels = [], pieData = [], pieColors = [];
+    const backBtn = document.getElementById('backButtonContainer');
 
-    const pieLabels = top10.map(i => i.label);
-    const pieData = top10.map(i => i.value);
-    const pieColors = top10.map((_, i) => COLORS[i % COLORS.length]);
+    if (viewLevel === 'macro') {
+        backBtn.style.display = 'none';
+        pieLabels = Object.keys(occupancyByCard);
+        pieData = Object.values(occupancyByCard);
+        pieColors = pieLabels.map(name => cardColorMap[name]);
 
-    if (otherValue > 0) {
-        pieLabels.push("Outras Compras Menores");
-        pieData.push(otherValue);
-        pieColors.push('#95a5a6');
+        if (globalLimit > 0) {
+            const available = Math.max(0, globalLimit - totalOccupied);
+            pieLabels.push('Limite Disponível');
+            pieData.push(available);
+            pieColors.push(RED_COLOR);
+        }
+        pieChart.options.plugins.title.text = 'Ocupação do Limite Global (Saldo Devedor por Cartão)';
+    } else {
+        backBtn.style.display = 'block';
+        detailItems.sort((a, b) => b.value - a.value);
+        const top10 = detailItems.slice(0, 10);
+        const rest = detailItems.slice(10);
+        const otherVal = rest.reduce((s, i) => s + i.value, 0);
+
+        pieLabels = top10.map(i => i.label);
+        pieData = top10.map(i => i.value);
+        const baseColor = cardColorMap[drilledCard];
+        pieColors = generateShades(baseColor, top10.length);
+
+        if (otherVal > 0) {
+            pieLabels.push("Outras Compras Menores");
+            pieData.push(otherVal);
+            pieColors.push('#95a5a6');
+        }
+        pieChart.options.plugins.title.text = `Detalhes de Compras: ${drilledCard}`;
     }
 
-    if (selectedMonthIndex === null && globalLimit > 0) {
-        const availableLimit = Math.max(0, globalLimit - totalOccupied);
-        pieLabels.push('Limite Disponível');
-        pieData.push(availableLimit);
-        pieColors.push(RED_COLOR);
-    }
-
-    pieChart.options.plugins.title.text = selectedMonthIndex === null 
-        ? 'Ocupação do Limite Global (Saldo Devedor)' 
-        : `Composição da Fatura: ${next6Months[selectedMonthIndex].name}`;
     pieChart.data.labels = pieLabels;
     pieChart.data.datasets[0].data = pieData;
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
+    // --- Atualizar Bar Chart (Stacked) ---
     barChart.data.labels = next6Months.map(m => m.name);
-    const cardNamesSorted = Object.keys(projectionByCard).sort();
-    barChart.data.datasets = cardNamesSorted.map((name, idx) => ({
+    barChart.data.datasets = Object.keys(projectionByCard).sort().map(name => ({
         label: name,
         data: projectionByCard[name],
-        backgroundColor: COLORS[idx % COLORS.length],
-        borderWidth: selectedMonthIndex === idx ? 2 : 0,
-        borderColor: '#2c3e50'
+        backgroundColor: cardColorMap[name],
+        borderColor: name === drilledCard ? '#000' : 'transparent',
+        borderWidth: name === drilledCard ? 2 : 0
     }));
     barChart.update();
 
-    logDebug(`Dashboard v${APP_VERSION}: Modo ${selectedMonthIndex === null ? 'Global' : 'Drill-down'}`);
+    logDebug(`Dashboard v${APP_VERSION}: ${viewLevel === 'macro' ? 'Visão Geral' : 'Drill-down: ' + drilledCard}`);
 }
 
 function getNextMonths(count) {
@@ -161,8 +189,8 @@ function getNextMonths(count) {
 }
 
 function initCharts() {
-    if (pieChart) try { pieChart.destroy(); } catch(e) {}
-    if (barChart) try { barChart.destroy(); } catch(e) {}
+    if (pieChart) pieChart.destroy();
+    if (barChart) barChart.destroy();
 
     const pieCtx = document.getElementById('pieChart').getContext('2d');
     pieChart = new Chart(pieCtx, {
@@ -170,14 +198,14 @@ function initCharts() {
         data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
         options: { 
             responsive: true,
-            plugins: {
-                tooltip: {
-                    callbacks: {
-                        label: (ctx) => {
-                            const val = ctx.parsed || 0;
-                            const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
-                            return `${ctx.label}: ${formatCurrency(val)} (${((val/total)*100).toFixed(1)}%)`;
-                        }
+            onClick: (evt, elements) => {
+                if (viewLevel === 'macro' && elements.length > 0) {
+                    const index = elements[0].index;
+                    const label = pieChart.data.labels[index];
+                    if (label !== 'Limite Disponível') {
+                        viewLevel = 'detail';
+                        drilledCard = label;
+                        updateDashboard();
                     }
                 }
             }
@@ -191,16 +219,7 @@ function initCharts() {
         options: { 
             responsive: true, 
             scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } },
-            onClick: (evt, elements) => {
-                if (elements.length > 0) {
-                    const index = elements[0].index;
-                    selectedMonthIndex = (selectedMonthIndex === index) ? null : index;
-                    updateDashboard();
-                } else {
-                    selectedMonthIndex = null;
-                    updateDashboard();
-                }
-            }
+            plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } }
         }
     });
 }
@@ -212,17 +231,13 @@ grist.ready({ requiredAccess: 'full' });
 grist.onRecords(async (records) => {
     try {
         logDebug(`Iniciando v${APP_VERSION}`);
-        
-        const rawBanco = await grist.docApi.fetchTable('Banco');
-        bancoData = colDataToRows(rawBanco);
-        
-        const rawCartoes = await grist.docApi.fetchTable('Cartoes');
-        cartoesData = colDataToRows(rawCartoes);
-        
+        bancoData = colDataToRows(await grist.docApi.fetchTable('Banco'));
+        cartoesData = colDataToRows(await grist.docApi.fetchTable('Cartoes'));
         allRecords = records.map(r => ({ ...r }));
 
         if (!pieChart || !barChart) initCharts();
         
+        // Populate Filtro
         const filter = document.getElementById('cardFilter');
         if (filter.options.length <= 1) {
             const cards = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].filter(Boolean).sort();
@@ -233,18 +248,24 @@ grist.onRecords(async (records) => {
                 filter.appendChild(opt);
             });
         }
-
         updateDashboard();
     } catch (e) { logDebug(`ERRO GERAL: ${e.message}`); }
 });
 
-document.getElementById('cardFilter').addEventListener('change', () => {
-    selectedMonthIndex = null;
+document.getElementById('btnBackToMacro').onclick = () => {
+    viewLevel = 'macro';
+    drilledCard = null;
     updateDashboard();
-});
-document.getElementById('appVersion').textContent = APP_VERSION;
-document.getElementById('clearLog').onclick = () => document.getElementById('debugLog').innerHTML = '';
-document.getElementById('copyLog').onclick = () => {
-    const text = document.getElementById('debugLog').innerText;
-    navigator.clipboard.writeText(text).then(() => alert('Log copiado!'));
+};
+
+document.getElementById('cardFilter').onchange = (e) => {
+    const val = e.target.value;
+    if (val === 'all') {
+        viewLevel = 'macro';
+        drilledCard = null;
+    } else {
+        viewLevel = 'detail';
+        drilledCard = val;
+    }
+    updateDashboard();
 };
