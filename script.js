@@ -1,4 +1,4 @@
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.2.1";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
@@ -19,6 +19,21 @@ function logDebug(message, data = null) {
     div.style.padding = "5px 0";
     div.textContent = text;
     logEl.prepend(div);
+}
+
+/**
+ * Converte dados de colunas do Grist para Array de Objetos (Rows)
+ */
+function colDataToRows(colData) {
+    if (!colData || !colData.id) return [];
+    const rows = [];
+    const keys = Object.keys(colData);
+    for (let i = 0; i < colData.id.length; i++) {
+        const r = { id: colData.id[i] };
+        keys.forEach(k => { if (k !== 'id') r[k] = colData[k][i]; });
+        rows.push(r);
+    }
+    return rows;
 }
 
 function getValue(obj, target) {
@@ -43,9 +58,6 @@ function getCardName(cardRef) {
     return cardRef.label || String(cardRef);
 }
 
-/**
- * Diferença de meses entre duas datas
- */
 function getMonthDiff(startDate, targetDate) {
     return (targetDate.getFullYear() - startDate.getFullYear()) * 12 + (targetDate.getMonth() - startDate.getMonth());
 }
@@ -56,10 +68,8 @@ async function updateDashboard() {
     const next6Months = getNextMonths(6);
     
     let totalOccupied = 0;
-    const itemsForPie = []; // { label, value }
-    const projectionByCard = {}; // { cardName: [6 values] }
-
-    // Obter data de hoje para referência
+    const itemsForPie = [];
+    const projectionByCard = {};
     const today = new Date();
 
     allRecords.forEach(r => {
@@ -71,26 +81,20 @@ async function updateDashboard() {
         const totalParc = getValue(r, 'Total_Parcelas') || 1;
         const desc = getValue(r, 'Descritivo') || 'Sem Descrição';
 
-        // Lógica de Projeção para o Bar Chart
         if (!projectionByCard[cardName]) projectionByCard[cardName] = Array(6).fill(0);
         
         for (let i = 0; i < 6; i++) {
             const targetMonthDate = next6Months[i].date;
             const diff = getMonthDiff(purchaseDate, targetMonthDate);
-            // Se a diferença está entre 0 e Total - 1, a parcela é devida naquele mês
             if (diff >= 0 && diff < totalParc) {
                 projectionByCard[cardName][i] += valParcela;
-                
-                // Se este mês for o selecionado para o Drill-down da Pizza
                 if (selectedMonthIndex === i) {
                     itemsForPie.push({ label: `${desc} (${cardName})`, value: valParcela });
                 }
             }
         }
 
-        // Lógica Global (Modo Ocupação)
         if (selectedMonthIndex === null) {
-            // No modo global, calculamos o saldo devedor TOTAL baseado na data atual
             const diffDesdeCompra = getMonthDiff(purchaseDate, today);
             const parcJaPagas = Math.max(0, diffDesdeCompra);
             const parcRestantes = Math.max(0, totalParc - parcJaPagas);
@@ -103,7 +107,6 @@ async function updateDashboard() {
         }
     });
 
-    // --- Processar Pizza (Top 10 + Outros) ---
     itemsForPie.sort((a, b) => b.value - a.value);
     const top10 = itemsForPie.slice(0, 10);
     const rest = itemsForPie.slice(10);
@@ -116,10 +119,9 @@ async function updateDashboard() {
     if (otherValue > 0) {
         pieLabels.push("Outras Compras Menores");
         pieData.push(otherValue);
-        pieColors.push('#95a5a6'); // Cinza para outros
+        pieColors.push('#95a5a6');
     }
 
-    // Se estiver no modo global, adiciona o Limite Disponível
     if (selectedMonthIndex === null && globalLimit > 0) {
         const availableLimit = Math.max(0, globalLimit - totalOccupied);
         pieLabels.push('Limite Disponível');
@@ -127,7 +129,6 @@ async function updateDashboard() {
         pieColors.push(RED_COLOR);
     }
 
-    // Atualizar Pie Chart
     pieChart.options.plugins.title.text = selectedMonthIndex === null 
         ? 'Ocupação do Limite Global (Saldo Devedor)' 
         : `Composição da Fatura: ${next6Months[selectedMonthIndex].name}`;
@@ -136,10 +137,9 @@ async function updateDashboard() {
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
-    // Atualizar Bar Chart
     barChart.data.labels = next6Months.map(m => m.name);
-    const cardNames = Object.keys(projectionByCard).sort();
-    barChart.data.datasets = cardNames.map((name, idx) => ({
+    const cardNamesSorted = Object.keys(projectionByCard).sort();
+    barChart.data.datasets = cardNamesSorted.map((name, idx) => ({
         label: name,
         data: projectionByCard[name],
         backgroundColor: COLORS[idx % COLORS.length],
@@ -155,17 +155,14 @@ function getNextMonths(count) {
     const months = []; const now = new Date();
     for (let i = 0; i < count; i++) {
         const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-        months.push({ 
-            name: d.toLocaleString('pt-BR', { month: 'long' }), 
-            date: d 
-        });
+        months.push({ name: d.toLocaleString('pt-BR', { month: 'long' }), date: d });
     }
     return months;
 }
 
 function initCharts() {
-    if (pieChart) pieChart.destroy();
-    if (barChart) barChart.destroy();
+    if (pieChart) try { pieChart.destroy(); } catch(e) {}
+    if (barChart) try { barChart.destroy(); } catch(e) {}
 
     const pieCtx = document.getElementById('pieChart').getContext('2d');
     pieChart = new Chart(pieCtx, {
@@ -215,14 +212,17 @@ grist.ready({ requiredAccess: 'full' });
 grist.onRecords(async (records) => {
     try {
         logDebug(`Iniciando v${APP_VERSION}`);
-        const tables = await grist.docApi.listTables();
-        bancoData = await grist.docApi.fetchTable('Banco');
-        cartoesData = await grist.docApi.fetchTable('Cartoes');
+        
+        const rawBanco = await grist.docApi.fetchTable('Banco');
+        bancoData = colDataToRows(rawBanco);
+        
+        const rawCartoes = await grist.docApi.fetchTable('Cartoes');
+        cartoesData = colDataToRows(rawCartoes);
+        
         allRecords = records.map(r => ({ ...r }));
 
         if (!pieChart || !barChart) initCharts();
         
-        // Popula o filtro apenas uma vez ou quando os registros mudarem
         const filter = document.getElementById('cardFilter');
         if (filter.options.length <= 1) {
             const cards = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].filter(Boolean).sort();
@@ -239,11 +239,12 @@ grist.onRecords(async (records) => {
 });
 
 document.getElementById('cardFilter').addEventListener('change', () => {
-    selectedMonthIndex = null; // Reseta o zoom ao mudar o filtro de cartão
+    selectedMonthIndex = null;
     updateDashboard();
 });
 document.getElementById('appVersion').textContent = APP_VERSION;
 document.getElementById('clearLog').onclick = () => document.getElementById('debugLog').innerHTML = '';
 document.getElementById('copyLog').onclick = () => {
-    navigator.clipboard.writeText(document.getElementById('debugLog').innerText).then(() => alert('Log copiado!'));
+    const text = document.getElementById('debugLog').innerText;
+    navigator.clipboard.writeText(text).then(() => alert('Log copiado!'));
 };
