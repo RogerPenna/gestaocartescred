@@ -1,4 +1,4 @@
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
@@ -45,17 +45,6 @@ function getCardName(cardRef) {
     }
     if (typeof cardRef === 'object') return cardRef.Nome_Cartao || cardRef.label || 'Cartão Indefinido';
     return 'Cartão Indefinido';
-}
-
-/**
- * Tenta encontrar o ID real da tabela no Grist comparando com o nome desejado
- */
-function findTableId(availableTables, targetName) {
-    const normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\s_]/g, "").toLowerCase();
-    const target = normalize(targetName);
-    // Tenta match exato primeiro, depois normalizado
-    const match = availableTables.find(t => t === targetName || normalize(t) === target);
-    return match || targetName;
 }
 
 async function updateDashboard() {
@@ -148,43 +137,46 @@ grist.onRecords(async (records) => {
     try {
         logDebug(`Iniciando v${APP_VERSION}`);
         
-        // 1. Descobrir quais tabelas existem no documento
-        const tables = await grist.docApi.listTables();
-        logDebug("Tabelas encontradas no documento:", tables);
+        // Usando os nomes exatos das tabelas fornecidos pelo usuário
+        const tableNames = {
+            lancamentos: 'Lancamentos',
+            bancos: 'Bancos',
+            cartoes: 'Cartoes'
+        };
 
-        const idLancamentos = findTableId(tables, 'Lancamentos');
-        const idBanco = findTableId(tables, 'Banco');
-        const idCartoes = findTableId(tables, 'Cartoes');
+        logDebug(`Buscando tabelas: ${tableNames.lancamentos}, ${tableNames.bancos}, ${tableNames.cartoes}`);
 
-        logDebug(`Usando IDs: Lancamentos=${idLancamentos}, Banco=${idBanco}, Cartoes=${idCartoes}`);
-
-        // 2. Buscar dados usando os IDs encontrados
-        const fetchLancamentos = await grist.docApi.fetchTable(idLancamentos);
+        // 1. Buscar dados
+        const fetchLancamentos = await grist.docApi.fetchTable(tableNames.lancamentos);
         allRecords = Array.isArray(fetchLancamentos) ? fetchLancamentos : (fetchLancamentos.records || []);
         
-        const fetchBanco = await grist.docApi.fetchTable(idBanco);
-        bancoData = Array.isArray(fetchBanco) ? fetchBanco : (fetchBanco.records || []);
+        const fetchBancos = await grist.docApi.fetchTable(tableNames.bancos);
+        bancoData = Array.isArray(fetchBancos) ? fetchBancos : (fetchBancos.records || []);
         
-        const fetchCartoes = await grist.docApi.fetchTable(idCartoes);
+        const fetchCartoes = await grist.docApi.fetchTable(tableNames.cartoes);
         cartoesData = Array.isArray(fetchCartoes) ? fetchCartoes : (fetchCartoes.records || []);
         
-        // Fallback: Se fetchTable não trouxe nada mas onRecords tem dados, usa onRecords para Lancamentos
+        // Fallback para onRecords
         if (allRecords.length === 0 && records && records.length > 0) {
-            logDebug("Aviso: fetchTable retornou vazio, usando dados do onRecords como fallback.");
+            logDebug("Aviso: fetchTable retornou vazio, usando onRecords.");
             allRecords = records;
         }
 
-        logDebug("Resumo Carga:", { lancamentos: allRecords.length, banco: bancoData.length, cartoes: cartoesData.length });
+        logDebug("Dados carregados:", { 
+            lancamentos: allRecords.length, 
+            bancos: bancoData.length, 
+            cartoes: cartoesData.length 
+        });
         
         if (allRecords.length > 0) {
-            logDebug("IDs do primeiro registro:", Object.keys(allRecords[0].fields || allRecords[0]));
+            logDebug("Exemplo campos primeiro lançamento:", Object.keys(allRecords[0].fields || allRecords[0]));
         }
 
         if (!pieChart || !barChart) initCharts();
         populateFilter();
         updateDashboard();
     } catch (e) {
-        logDebug(`ERRO: ${e.message}`);
+        logDebug(`ERRO NO CARREGAMENTO: ${e.message}`);
     }
 });
 
