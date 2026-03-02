@@ -1,4 +1,4 @@
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
@@ -20,7 +20,6 @@ function logDebug(message, data = null) {
     div.style.padding = "5px 0";
     div.textContent = text;
     logEl.prepend(div);
-    console.log(message, data);
 }
 
 function getValue(obj, target) {
@@ -45,6 +44,18 @@ function getCardName(cardRef) {
     }
     if (typeof cardRef === 'object') return cardRef.Nome_Cartao || cardRef.label || 'Cartão Indefinido';
     return 'Cartão Indefinido';
+}
+
+/**
+ * Resolve o ID real da tabela no Grist
+ */
+function resolveTableId(availableTables, target) {
+    const normalize = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\s_]/g, "").toLowerCase();
+    const t = normalize(target);
+    // Tenta match exato, depois normalizado, depois contém
+    return availableTables.find(id => normalize(id) === t) || 
+           availableTables.find(id => normalize(id).includes(t)) || 
+           target;
 }
 
 async function updateDashboard() {
@@ -72,6 +83,7 @@ async function updateDashboard() {
     });
 
     logDebug(`Dashboard: Limite=${globalLimit}, Ocupado=${totalOccupied}, Cartões=${Object.keys(occupancyByCard).length}`);
+    
     const availableLimit = Math.max(0, globalLimit - totalOccupied);
     const pieLabels = Object.keys(occupancyByCard);
     const pieData = Object.values(occupancyByCard);
@@ -105,7 +117,6 @@ function populateFilter() {
 }
 
 function formatCurrency(v) { return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v); }
-
 function getNextMonths(count) {
     const months = []; const now = new Date();
     for (let i = 0; i < count; i++) {
@@ -137,46 +148,45 @@ grist.onRecords(async (records) => {
     try {
         logDebug(`Iniciando v${APP_VERSION}`);
         
-        // Usando os nomes exatos das tabelas fornecidos pelo usuário
-        const tableNames = {
-            lancamentos: 'Lancamentos',
-            bancos: 'Bancos',
-            cartoes: 'Cartoes'
-        };
+        // 1. Descobrir IDs reais das tabelas
+        const tables = await grist.docApi.listTables();
+        logDebug("IDs de Tabelas encontrados no Grist:", tables);
 
-        logDebug(`Buscando tabelas: ${tableNames.lancamentos}, ${tableNames.bancos}, ${tableNames.cartoes}`);
+        const idLancamentos = resolveTableId(tables, 'Lancamentos');
+        const idBancos = resolveTableId(tables, 'Bancos');
+        const idCartoes = resolveTableId(tables, 'Cartoes');
 
-        // 1. Buscar dados
-        const fetchLancamentos = await grist.docApi.fetchTable(tableNames.lancamentos);
-        allRecords = Array.isArray(fetchLancamentos) ? fetchLancamentos : (fetchLancamentos.records || []);
+        logDebug(`Tentando carregar IDs: ${idLancamentos}, ${idBancos}, ${idCartoes}`);
+
+        // 2. Carregar dados com tratamento de erro individual
+        try {
+            const f = await grist.docApi.fetchTable(idLancamentos);
+            allRecords = Array.isArray(f) ? f : (f.records || []);
+        } catch(e) { logDebug(`Erro ao ler Lancamentos (${idLancamentos}): ${e.message}`); }
+
+        try {
+            const f = await grist.docApi.fetchTable(idBancos);
+            bancoData = Array.isArray(f) ? f : (f.records || []);
+        } catch(e) { logDebug(`Erro ao ler Bancos (${idBancos}): ${e.message}`); }
+
+        try {
+            const f = await grist.docApi.fetchTable(idCartoes);
+            cartoesData = Array.isArray(f) ? f : (f.records || []);
+        } catch(e) { logDebug(`Erro ao ler Cartoes (${idCartoes}): ${e.message}`); }
         
-        const fetchBancos = await grist.docApi.fetchTable(tableNames.bancos);
-        bancoData = Array.isArray(fetchBancos) ? fetchBancos : (fetchBancos.records || []);
-        
-        const fetchCartoes = await grist.docApi.fetchTable(tableNames.cartoes);
-        cartoesData = Array.isArray(fetchCartoes) ? fetchCartoes : (fetchCartoes.records || []);
-        
-        // Fallback para onRecords
+        // Fallback para onRecords (se o widget estiver na tabela certa)
         if (allRecords.length === 0 && records && records.length > 0) {
-            logDebug("Aviso: fetchTable retornou vazio, usando onRecords.");
             allRecords = records;
+            logDebug("Usando dados do onRecords para Lancamentos.");
         }
 
-        logDebug("Dados carregados:", { 
-            lancamentos: allRecords.length, 
-            bancos: bancoData.length, 
-            cartoes: cartoesData.length 
-        });
+        logDebug("Carga finalizada:", { lancamentos: allRecords.length, bancos: bancoData.length, cartoes: cartoesData.length });
         
-        if (allRecords.length > 0) {
-            logDebug("Exemplo campos primeiro lançamento:", Object.keys(allRecords[0].fields || allRecords[0]));
-        }
-
         if (!pieChart || !barChart) initCharts();
         populateFilter();
         updateDashboard();
     } catch (e) {
-        logDebug(`ERRO NO CARREGAMENTO: ${e.message}`);
+        logDebug(`ERRO GERAL: ${e.message}`);
     }
 });
 
@@ -184,6 +194,5 @@ document.getElementById('cardFilter').addEventListener('change', updateDashboard
 document.getElementById('appVersion').textContent = APP_VERSION;
 document.getElementById('clearLog').onclick = () => document.getElementById('debugLog').innerHTML = '';
 document.getElementById('copyLog').onclick = () => {
-    const text = document.getElementById('debugLog').innerText;
-    navigator.clipboard.writeText(text).then(() => alert('Log copiado!'));
+    navigator.clipboard.writeText(document.getElementById('debugLog').innerText).then(() => alert('Log copiado!'));
 };
