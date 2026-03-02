@@ -1,12 +1,15 @@
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 let allRecords = [];
 let bancoData = [];
 let cartoesData = [];
 let pieChart, barChart;
 
-// Estado do Drill-down
-let viewLevel = 'macro'; // 'macro' (cartões) ou 'detail' (compras de um cartão)
-let drilledCard = null; // Nome do cartão selecionado para detalhe
+// Dashboard States
+let viewLevel = 'macro'; 
+let drilledCard = null;
+
+// Entry States
+let installmentPreview = [];
 
 const COLORS = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#f39c12', '#d35400', '#16a085', '#27ae60', '#2980b9', '#8e44ad', '#2c3e50'];
 const RED_COLOR = '#e74c3c';
@@ -24,6 +27,22 @@ function logDebug(message, data = null) {
     logEl.prepend(div);
 }
 
+/**
+ * Tab Management
+ */
+function switchTab(tabId) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    
+    document.getElementById(`tab-${tabId}`).classList.add('active');
+    document.querySelector(`button[onclick="switchTab('${tabId}')"]`).classList.add('active');
+    
+    if (tabId === 'dashboard') updateDashboard();
+}
+
+/**
+ * Grist Utilities
+ */
 function colDataToRows(colData) {
     if (!colData || !colData.id) return [];
     const rows = [];
@@ -58,32 +77,24 @@ function getCardName(cardRef) {
     return cardRef.label || String(cardRef);
 }
 
-function generateShades(baseColor, count) {
-    // Função simples para gerar tons baseados em opacidade/luminosidade
-    const shades = [];
-    for (let i = 0; i < count; i++) {
-        const opacity = (1 - (i * 0.08)).toFixed(2);
-        shades.push(`${baseColor}${Math.floor(opacity * 255).toString(16).padStart(2, '0')}`);
-    }
-    return shades;
-}
-
 function getMonthDiff(startDate, targetDate) {
     return (targetDate.getFullYear() - startDate.getFullYear()) * 12 + (targetDate.getMonth() - startDate.getMonth());
 }
 
+/**
+ * Dashboard Logic
+ */
 async function updateDashboard() {
     const selectedCard = document.getElementById('cardFilter').value;
     const globalLimit = bancoData.reduce((sum, row) => sum + (getValue(row, 'Limite') || 0), 0);
     const next6Months = getNextMonths(6);
     const today = new Date();
 
-    const occupancyByCard = {}; // Para visão Macro
-    const projectionByCard = {}; // Para Barras Empilhadas
-    const detailItems = []; // Para visão Micro (Drill-down)
+    const occupancyByCard = {};
+    const projectionByCard = {};
+    const detailItems = [];
     let totalOccupied = 0;
 
-    // Mapa de cores fixas por cartão
     const uniqueCardNames = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].sort();
     const cardColorMap = {};
     uniqueCardNames.forEach((name, i) => cardColorMap[name] = COLORS[i % COLORS.length]);
@@ -97,7 +108,6 @@ async function updateDashboard() {
         const totalParc = getValue(r, 'Total_Parcelas') || 1;
         const desc = getValue(r, 'Descritivo') || 'Sem Descrição';
 
-        // Cálculo de saldo devedor (Ocupação Global)
         const diffDesdeCompra = getMonthDiff(purchaseDate, today);
         const parcJaPagas = Math.max(0, diffDesdeCompra);
         const parcRestantes = Math.max(0, totalParc - parcJaPagas);
@@ -106,24 +116,16 @@ async function updateDashboard() {
         if (saldoDevedor > 0) {
             occupancyByCard[cardName] = (occupancyByCard[cardName] || 0) + saldoDevedor;
             totalOccupied += saldoDevedor;
-            
-            // Se estivermos no modo Drill-down deste cartão
-            if (viewLevel === 'detail' && cardName === drilledCard) {
-                detailItems.push({ label: desc, value: saldoDevedor });
-            }
+            if (viewLevel === 'detail' && cardName === drilledCard) detailItems.push({ label: desc, value: saldoDevedor });
         }
 
-        // Projeção para Barras
         if (!projectionByCard[cardName]) projectionByCard[cardName] = Array(6).fill(0);
         for (let i = 0; i < 6; i++) {
             const diff = getMonthDiff(purchaseDate, next6Months[i].date);
-            if (diff >= 0 && diff < totalParc) {
-                projectionByCard[cardName][i] += valParcela;
-            }
+            if (diff >= 0 && diff < totalParc) projectionByCard[cardName][i] += valParcela;
         }
     });
 
-    // --- Atualizar Pie Chart (Macro vs Micro) ---
     let pieLabels = [], pieData = [], pieColors = [];
     const backBtn = document.getElementById('backButtonContainer');
 
@@ -132,32 +134,25 @@ async function updateDashboard() {
         pieLabels = Object.keys(occupancyByCard);
         pieData = Object.values(occupancyByCard);
         pieColors = pieLabels.map(name => cardColorMap[name]);
-
         if (globalLimit > 0) {
-            const available = Math.max(0, globalLimit - totalOccupied);
             pieLabels.push('Limite Disponível');
-            pieData.push(available);
+            pieData.push(Math.max(0, globalLimit - totalOccupied));
             pieColors.push(RED_COLOR);
         }
-        pieChart.options.plugins.title.text = 'Ocupação do Limite Global (Saldo Devedor por Cartão)';
     } else {
         backBtn.style.display = 'block';
         detailItems.sort((a, b) => b.value - a.value);
         const top10 = detailItems.slice(0, 10);
         const rest = detailItems.slice(10);
-        const otherVal = rest.reduce((s, i) => s + i.value, 0);
-
         pieLabels = top10.map(i => i.label);
         pieData = top10.map(i => i.value);
         const baseColor = cardColorMap[drilledCard];
-        pieColors = generateShades(baseColor, top10.length);
-
-        if (otherVal > 0) {
-            pieLabels.push("Outras Compras Menores");
-            pieData.push(otherVal);
+        pieColors = top10.map((_, i) => `${baseColor}${Math.floor((1 - i*0.08) * 255).toString(16).padStart(2, '0')}`);
+        if (rest.length > 0) {
+            pieLabels.push("Outros");
+            pieData.push(rest.reduce((s, i) => s + i.value, 0));
             pieColors.push('#95a5a6');
         }
-        pieChart.options.plugins.title.text = `Detalhes de Compras: ${drilledCard}`;
     }
 
     pieChart.data.labels = pieLabels;
@@ -165,7 +160,6 @@ async function updateDashboard() {
     pieChart.data.datasets[0].backgroundColor = pieColors;
     pieChart.update();
 
-    // --- Atualizar Bar Chart (Stacked) ---
     barChart.data.labels = next6Months.map(m => m.name);
     barChart.data.datasets = Object.keys(projectionByCard).sort().map(name => ({
         label: name,
@@ -175,10 +169,78 @@ async function updateDashboard() {
         borderWidth: name === drilledCard ? 2 : 0
     }));
     barChart.update();
-
-    logDebug(`Dashboard v${APP_VERSION}: ${viewLevel === 'macro' ? 'Visão Geral' : 'Drill-down: ' + drilledCard}`);
 }
 
+/**
+ * DATA ENTRY LOGIC
+ */
+function generatePreview() {
+    const cardId = parseInt(document.getElementById('inCard').value);
+    const dateStr = document.getElementById('inDate').value;
+    const baseDesc = document.getElementById('inDesc').value;
+    const totalVal = parseFloat(document.getElementById('inTotal').value);
+    const installments = parseInt(document.getElementById('inInstallments').value);
+
+    if (!cardId || !dateStr || !baseDesc || isNaN(totalVal) || isNaN(installments)) {
+        alert("Por favor, preencha todos os campos corretamente.");
+        return;
+    }
+
+    const valorParcela = parseFloat((totalVal / installments).toFixed(2));
+    const startDate = new Date(dateStr + "T00:00:00");
+    
+    installmentPreview = [];
+    const tbody = document.querySelector('#previewTable tbody');
+    tbody.innerHTML = '';
+
+    for (let i = 1; i <= installments; i++) {
+        const currentDate = new Date(startDate);
+        currentDate.setMonth(startDate.getMonth() + (i - 1));
+        
+        // Formato para Regex do Grist: "Descritivo 01 10"
+        const installmentSuffix = `${String(i).padStart(2, '0')} ${String(installments).padStart(2, '0')}`;
+        const finalDesc = `${baseDesc} ${installmentSuffix}`;
+        const dateIso = currentDate.toISOString().split('T')[0];
+
+        installmentPreview.push({
+            Cartao: cardId,
+            Data: dateIso,
+            Descritivo: finalDesc,
+            Valor_Parcela: valorParcela,
+            Total_Parcelas: installments
+        });
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${currentDate.toLocaleDateString('pt-BR')}</td><td>${finalDesc}</td><td>${formatCurrency(valorParcela)}</td>`;
+        tbody.appendChild(tr);
+    }
+
+    document.getElementById('previewSection').style.display = 'block';
+}
+
+async function saveToGrist() {
+    if (installmentPreview.length === 0) return;
+    
+    logDebug(`Salvando ${installmentPreview.length} registros no Grist...`);
+    try {
+        await grist.docApi.addRecords('Lancamentos', installmentPreview.map(p => ({ fields: p })));
+        logDebug("Sucesso ao salvar no Grist!");
+        alert("Lançamentos criados com sucesso!");
+        
+        // Reset form e volta pro dashboard
+        document.getElementById('tab-entry').querySelectorAll('input').forEach(i => i.value = '');
+        document.getElementById('inInstallments').value = '1';
+        document.getElementById('previewSection').style.display = 'none';
+        switchTab('dashboard');
+    } catch (e) {
+        logDebug("Erro ao salvar no Grist:", e.message);
+        alert("Erro ao salvar: " + e.message);
+    }
+}
+
+/**
+ * Setup & Init
+ */
 function getNextMonths(count) {
     const months = []; const now = new Date();
     for (let i = 0; i < count; i++) {
@@ -192,35 +254,24 @@ function initCharts() {
     if (pieChart) pieChart.destroy();
     if (barChart) barChart.destroy();
 
-    const pieCtx = document.getElementById('pieChart').getContext('2d');
-    pieChart = new Chart(pieCtx, {
+    pieChart = new Chart(document.getElementById('pieChart').getContext('2d'), {
         type: 'pie',
         data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
         options: { 
             responsive: true,
             onClick: (evt, elements) => {
                 if (viewLevel === 'macro' && elements.length > 0) {
-                    const index = elements[0].index;
-                    const label = pieChart.data.labels[index];
-                    if (label !== 'Limite Disponível') {
-                        viewLevel = 'detail';
-                        drilledCard = label;
-                        updateDashboard();
-                    }
+                    const label = pieChart.data.labels[elements[0].index];
+                    if (label !== 'Limite Disponível') { viewLevel = 'detail'; drilledCard = label; updateDashboard(); }
                 }
             }
         }
     });
 
-    const barCtx = document.getElementById('barChart').getContext('2d');
-    barChart = new Chart(barCtx, {
+    barChart = new Chart(document.getElementById('barChart').getContext('2d'), {
         type: 'bar',
         data: { labels: [], datasets: [] },
-        options: { 
-            responsive: true, 
-            scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } },
-            plugins: { title: { display: true, text: 'Projeção para os Próximos 6 Meses' } }
-        }
+        options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatCurrency(v) } } } }
     });
 }
 
@@ -237,35 +288,43 @@ grist.onRecords(async (records) => {
 
         if (!pieChart || !barChart) initCharts();
         
-        // Populate Filtro
-        const filter = document.getElementById('cardFilter');
-        if (filter.options.length <= 1) {
-            const cards = [...new Set(allRecords.map(r => getCardName(r.Cartao)))].filter(Boolean).sort();
-            cards.forEach(card => {
-                const opt = document.createElement('option');
-                opt.value = card;
-                opt.textContent = card;
-                filter.appendChild(opt);
+        // Populate Filtros e Dropdowns
+        const cardFilter = document.getElementById('cardFilter');
+        const inCardSelect = document.getElementById('inCard');
+        
+        if (cardFilter.options.length <= 1) {
+            const cards = cartoesData.map(c => ({ id: c.id, name: getCardName(c) })).sort((a,b) => a.name.localeCompare(b.name));
+            
+            cardFilter.innerHTML = '<option value="all">Todos os Cartões</option>';
+            inCardSelect.innerHTML = '<option value="">Selecione um cartão...</option>';
+
+            cards.forEach(c => {
+                const opt1 = document.createElement('option');
+                opt1.value = c.name; opt1.textContent = c.name;
+                cardFilter.appendChild(opt1);
+
+                const opt2 = document.createElement('option');
+                opt2.value = c.id; opt2.textContent = c.name;
+                inCardSelect.appendChild(opt2);
             });
         }
+        
+        // Data default para hoje
+        if (!document.getElementById('inDate').value) {
+            document.getElementById('inDate').value = new Date().toISOString().split('T')[0];
+        }
+
         updateDashboard();
     } catch (e) { logDebug(`ERRO GERAL: ${e.message}`); }
 });
 
-document.getElementById('btnBackToMacro').onclick = () => {
-    viewLevel = 'macro';
-    drilledCard = null;
-    updateDashboard();
+document.getElementById('btnBackToMacro').onclick = () => { viewLevel = 'macro'; drilledCard = null; updateDashboard(); };
+document.getElementById('btnPreview').onclick = generatePreview;
+document.getElementById('btnSave').onclick = saveToGrist;
+document.getElementById('appVersion').textContent = APP_VERSION;
+document.getElementById('clearLog').onclick = () => document.getElementById('debugLog').innerHTML = '';
+document.getElementById('copyLog').onclick = () => {
+    navigator.clipboard.writeText(document.getElementById('debugLog').innerText).then(() => alert('Log copiado!'));
 };
 
-document.getElementById('cardFilter').onchange = (e) => {
-    const val = e.target.value;
-    if (val === 'all') {
-        viewLevel = 'macro';
-        drilledCard = null;
-    } else {
-        viewLevel = 'detail';
-        drilledCard = val;
-    }
-    updateDashboard();
-};
+window.switchTab = switchTab;
